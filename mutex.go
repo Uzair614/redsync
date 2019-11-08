@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gomodule/redigo/redis"
+	"github.com/hashicorp/go-multierror"
 )
 
 // A Mutex is a distributed mutual exclusion lock.
@@ -69,33 +70,41 @@ func (m *Mutex) Lock() error {
 }
 
 // Unlock unlocks m and returns the status of unlock.
-func (m *Mutex) Unlock() bool {
+func (m *Mutex) Unlock() (bool, error) {
 	m.nodem.Lock()
 	defer m.nodem.Unlock()
+	var combinedErrs error
 
 	n := 0
 	for _, pool := range m.pools {
-		ok := m.release(pool, m.value)
+		ok, err := m.release(pool, m.value)
 		if ok {
 			n++
 		}
+		if err != nil {
+			combinedErrs = multierror.Append(combinedErrs, err)
+		}
 	}
-	return n >= m.quorum
+	return n >= m.quorum, combinedErrs
 }
 
 // Extend resets the mutex's expiry and returns the status of expiry extension.
-func (m *Mutex) Extend() bool {
+func (m *Mutex) Extend() (bool, error) {
 	m.nodem.Lock()
 	defer m.nodem.Unlock()
+	var combinedErrs error
 
 	n := 0
 	for _, pool := range m.pools {
-		ok := m.touch(pool, m.value, int(m.expiry/time.Millisecond))
+		ok, err := m.touch(pool, m.value, int(m.expiry/time.Millisecond))
 		if ok {
 			n++
 		}
+		if err != nil {
+			combinedErrs = multierror.Append(combinedErrs, err)
+		}
 	}
-	return n >= m.quorum
+	return n >= m.quorum, combinedErrs
 }
 
 func (m *Mutex) genValue() (string, error) {
@@ -122,11 +131,11 @@ var deleteScript = redis.NewScript(1, `
 	end
 `)
 
-func (m *Mutex) release(pool Pool, value string) bool {
+func (m *Mutex) release(pool Pool, value string) (bool, error) {
 	conn := pool.Get()
 	defer conn.Close()
 	status, err := deleteScript.Do(conn, m.name, value)
-	return err == nil && status != 0
+	return err == nil && status != int64(0), err
 }
 
 var touchScript = redis.NewScript(1, `
@@ -137,9 +146,9 @@ var touchScript = redis.NewScript(1, `
 	end
 `)
 
-func (m *Mutex) touch(pool Pool, value string, expiry int) bool {
+func (m *Mutex) touch(pool Pool, value string, expiry int) (bool, error) {
 	conn := pool.Get()
 	defer conn.Close()
 	status, err := redis.String(touchScript.Do(conn, m.name, value, expiry))
-	return err == nil && status != "ERR"
+	return err == nil && status != "ERR", err
 }
